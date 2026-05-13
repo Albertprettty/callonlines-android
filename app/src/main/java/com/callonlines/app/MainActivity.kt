@@ -2,13 +2,16 @@ package com.callonlines.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
@@ -21,6 +24,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -34,6 +38,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var webView: WebView
     private lateinit var swipe: SwipeRefreshLayout
+    private lateinit var credentialStore: SavedCreds
+
+    private var pendingCredentials: Pair<String, String>? = null
 
     private var pendingPermissionRequest: PermissionRequest? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
@@ -79,6 +86,7 @@ class MainActivity : AppCompatActivity() {
 
         webView = binding.webview
         swipe = binding.swipe
+        credentialStore = SavedCreds(this)
 
         configureWebView()
 
@@ -113,7 +121,7 @@ class MainActivity : AppCompatActivity() {
             setSupportMultipleWindows(false)
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            userAgentString = userAgentString + " CallOnLinesApp/1.0"
+            userAgentString = userAgentString + " CallOnLines/1.0"
             cacheMode = WebSettings.LOAD_DEFAULT
             useWideViewPort = true
             loadWithOverviewMode = true
@@ -137,6 +145,8 @@ class MainActivity : AppCompatActivity() {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, true)
         }
+
+        webView.addJavascriptInterface(JsBridge(), "AndroidBridge")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
@@ -188,6 +198,24 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 binding.progress.visibility = View.GONE
                 swipe.isRefreshing = false
+
+                val urlStr = url ?: ""
+                val isLogin = isLoginUrl(urlStr)
+
+                if (isLogin) {
+                    view?.evaluateJavascript(AUTOFILL_JS, null)
+                } else {
+                    val pending = pendingCredentials
+                    if (pending != null) {
+                        pendingCredentials = null
+                        val sameAsSaved =
+                            credentialStore.getUser() == pending.first &&
+                            credentialStore.getPass() == pending.second
+                        if (!sameAsSaved) {
+                            showSaveCredentialsDialog(pending.first, pending.second)
+                        }
+                    }
+                }
             }
 
             override fun onReceivedHttpError(
@@ -251,10 +279,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    inner class JsBridge {
+        @JavascriptInterface
+        fun onLoginSubmit(user: String, pass: String) {
+            pendingCredentials = Pair(user, pass)
+        }
+
+        @JavascriptInterface
+        fun getSavedUser(): String = credentialStore.getUser()
+
+        @JavascriptInterface
+        fun getSavedPass(): String = credentialStore.getPass()
+
+        @JavascriptInterface
+        fun hasCredentials(): Boolean = credentialStore.has()
+
+        @JavascriptInterface
+        fun requestClear() {
+            runOnUiThread {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Borrar credenciales guardadas")
+                    .setMessage("¿Quieres eliminar el usuario y contraseña guardados en este dispositivo?")
+                    .setPositiveButton("Borrar") { _, _ ->
+                        credentialStore.clear()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Credenciales borradas",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun showSaveCredentialsDialog(user: String, pass: String) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("¿Guardar credenciales?")
+                .setMessage("Guarda tu usuario y contraseña en este dispositivo para no tener que escribirlos cada vez.")
+                .setPositiveButton("Guardar") { _, _ ->
+                    credentialStore.save(user, pass)
+                    Toast.makeText(
+                        this,
+                        "Credenciales guardadas",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                .setNegativeButton("Ahora no", null)
+                .show()
+        }
+    }
+
     private fun isAllowedHost(host: String): Boolean {
         return ALLOWED_HOSTS.any { allowed ->
             host == allowed || host.endsWith(".$allowed")
         }
+    }
+
+    private fun isLoginUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("/login.php") && !lower.contains("/root_login.php")
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -282,9 +368,103 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val START_URL = "https://callonlines.com/login.php"
+
         private val ALLOWED_HOSTS = listOf(
             "callonlines.com",
             "www.callonlines.com"
         )
+
+        private val AUTOFILL_JS = """
+        (function () {
+          if (window.__cb_autofill_ready) return;
+          window.__cb_autofill_ready = true;
+
+          function findFields() {
+            var passInput = document.querySelector('input[type="password"]:not([disabled])');
+            if (!passInput) return null;
+            var form = passInput.closest('form');
+            if (!form) return null;
+            var userInput = null;
+            var inputs = form.querySelectorAll('input');
+            for (var i = 0; i < inputs.length; i++) {
+              var inp = inputs[i];
+              if (inp === passInput) continue;
+              var t = (inp.type || 'text').toLowerCase();
+              if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox' || t === 'radio') continue;
+              userInput = inp;
+              break;
+            }
+            return { form: form, userInput: userInput, passInput: passInput };
+          }
+
+          var fields = findFields();
+          if (!fields) return;
+
+          try {
+            var alreadyTried = sessionStorage.getItem('cb_autofill_done') === '1';
+            if (!alreadyTried && AndroidBridge.hasCredentials() && fields.userInput && fields.passInput) {
+              if (!fields.userInput.value) {
+                fields.userInput.value = AndroidBridge.getSavedUser();
+                fields.userInput.dispatchEvent(new Event('input', { bubbles: true }));
+                fields.userInput.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              if (!fields.passInput.value) {
+                fields.passInput.value = AndroidBridge.getSavedPass();
+                fields.passInput.dispatchEvent(new Event('input', { bubbles: true }));
+                fields.passInput.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              sessionStorage.setItem('cb_autofill_done', '1');
+            }
+          } catch (e) {}
+
+          fields.form.addEventListener('submit', function () {
+            try {
+              var u = fields.userInput ? fields.userInput.value : '';
+              var p = fields.passInput.value;
+              if (u && p) {
+                AndroidBridge.onLoginSubmit(u, p);
+              }
+            } catch (e) {}
+          }, true);
+
+          try {
+            if (AndroidBridge.hasCredentials() && !document.getElementById('cb_clear_saved_btn')) {
+              var btn = document.createElement('div');
+              btn.id = 'cb_clear_saved_btn';
+              btn.textContent = 'Borrar credenciales guardadas';
+              btn.style.cssText = 'position:fixed;bottom:14px;left:50%;transform:translateX(-50%);padding:9px 14px;background:rgba(0,0,0,.62);color:#fff;font-family:system-ui,-apple-system,sans-serif;font-size:12px;border-radius:999px;cursor:pointer;z-index:99999;border:1px solid rgba(255,255,255,.18);';
+              btn.onclick = function () { AndroidBridge.requestClear(); };
+              document.body.appendChild(btn);
+            }
+          } catch (e) {}
+        })();
+        """.trimIndent()
+    }
+}
+
+class SavedCreds(context: Context) {
+    private val prefs: SharedPreferences = context.getSharedPreferences(
+        PREF_FILE, Context.MODE_PRIVATE
+    )
+
+    fun save(user: String, pass: String) {
+        prefs.edit()
+            .putString(KEY_USER, user)
+            .putString(KEY_PASS, pass)
+            .apply()
+    }
+
+    fun getUser(): String = prefs.getString(KEY_USER, "") ?: ""
+    fun getPass(): String = prefs.getString(KEY_PASS, "") ?: ""
+    fun has(): Boolean = getUser().isNotEmpty() && getPass().isNotEmpty()
+
+    fun clear() {
+        prefs.edit().clear().apply()
+    }
+
+    private companion object {
+        const val PREF_FILE = "callonlines_app_creds"
+        const val KEY_USER = "user"
+        const val KEY_PASS = "pass"
     }
 }
