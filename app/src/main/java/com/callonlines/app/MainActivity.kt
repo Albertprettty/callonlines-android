@@ -43,6 +43,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipe: SwipeRefreshLayout
     private lateinit var creds: SavedCreds
 
+    private var pendingCredentials: Pair<String, String>? = null
+    private var lastLoginUrl: String? = null
+
     private var pendingPermissionRequest: PermissionRequest? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
@@ -143,7 +146,23 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 binding.progress.visibility = View.GONE
                 swipe.isRefreshing = false
-                view?.evaluateJavascript(JS, null)
+                val u = url ?: ""
+                if (u.contains("/login.php", ignoreCase = true)) {
+                    lastLoginUrl = u
+                    view?.evaluateJavascript(JS, null)
+                } else {
+                    val wasOnLogin = lastLoginUrl != null
+                    lastLoginUrl = null
+                    if (wasOnLogin) {
+                        val pending = pendingCredentials
+                        pendingCredentials = null
+                        val noSaved = !creds.has()
+                        val diff = pending != null && (creds.getUser() != pending.first || creds.getPass() != pending.second)
+                        if (noSaved || diff) {
+                            showCredsDialog(pending?.first ?: "", pending?.second ?: "")
+                        }
+                    }
+                }
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
@@ -182,8 +201,10 @@ class MainActivity : AppCompatActivity() {
 
     inner class JsBridge {
         @JavascriptInterface
-        fun openSaveDialog(prefillUser: String, prefillPass: String) {
-            runOnUiThread { showCredsDialog(prefillUser, prefillPass) }
+        fun cache(user: String, pass: String) {
+            if (user.isNotEmpty() && pass.isNotEmpty()) {
+                pendingCredentials = Pair(user, pass)
+            }
         }
         @JavascriptInterface fun getSavedUser() = creds.getUser()
         @JavascriptInterface fun getSavedPass() = creds.getPass()
@@ -224,8 +245,8 @@ class MainActivity : AppCompatActivity() {
             addView(passEdit)
         }
         AlertDialog.Builder(this)
-            .setTitle("Guardar credenciales")
-            .setMessage("Escribe o confirma tus datos. Se guardarán en este dispositivo para autocompletar la próxima vez.")
+            .setTitle("¿Guardar credenciales?")
+            .setMessage("Se guardarán en este dispositivo para autocompletar la próxima vez.")
             .setView(layout)
             .setPositiveButton("Guardar") { _, _ ->
                 val u = userEdit.text.toString().trim()
@@ -233,11 +254,9 @@ class MainActivity : AppCompatActivity() {
                 if (u.isNotBlank() && p.isNotBlank()) {
                     creds.save(u, p)
                     Toast.makeText(this, "✓ Credenciales guardadas", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Escribe usuario y contraseña", Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("Cancelar", null).show()
+            .setNegativeButton("Ahora no", null).show()
     }
 
     private fun isAllowed(host: String) = ALLOWED.any { host == it || host.endsWith(".$it") }
@@ -286,6 +305,13 @@ class MainActivity : AppCompatActivity() {
     }
     return null;
   }
+  function report(){
+    try{
+      var p=findPass();if(!p)return;
+      var u=findUser(p);
+      if(u&&u.value&&p.value)AndroidBridge.cache(u.value,p.value);
+    }catch(e){}
+  }
   function autofill(){
     try{
       if(!AndroidBridge.hasCredentials())return;
@@ -295,28 +321,22 @@ class MainActivity : AppCompatActivity() {
       if(!p.value){p.value=AndroidBridge.getSavedPass();p.dispatchEvent(new Event('input',{bubbles:true}));p.dispatchEvent(new Event('change',{bubbles:true}));}
     }catch(e){}
   }
-  function addButtons(){
-    if(!document.getElementById('cbsave')){
-      var b=document.createElement('button');
-      b.id='cbsave';b.type='button';b.textContent='Guardar contrasena';
-      b.style.cssText='position:fixed!important;top:14px!important;right:14px!important;padding:11px 18px!important;background:linear-gradient(135deg,#22D3EE,#A855F7)!important;color:#fff!important;font:700 13px system-ui,sans-serif!important;border:0!important;border-radius:10px!important;z-index:2147483647!important;box-shadow:0 4px 14px rgba(34,211,238,.5)!important;cursor:pointer!important;';
-      b.onclick=function(e){
-        e.preventDefault();e.stopPropagation();
-        var p=findPass(),u=p?findUser(p):null;
-        AndroidBridge.openSaveDialog(u&&u.value?u.value:'',p&&p.value?p.value:'');
-      };
-      document.body.appendChild(b);
-    }
-    if(AndroidBridge.hasCredentials()&&!document.getElementById('cbclr')){
-      var c=document.createElement('div');
-      c.id='cbclr';c.textContent='Borrar credenciales guardadas';
-      c.style.cssText='position:fixed!important;bottom:14px!important;left:50%!important;transform:translateX(-50%)!important;padding:9px 14px!important;background:rgba(0,0,0,.62)!important;color:#fff!important;font:12px system-ui,sans-serif!important;border-radius:999px!important;z-index:2147483647!important;border:1px solid rgba(255,255,255,.18)!important;cursor:pointer!important;';
-      c.onclick=function(){AndroidBridge.requestClear();};
-      document.body.appendChild(c);
-    }
+  function addClear(){
+    if(!AndroidBridge.hasCredentials())return;
+    if(document.getElementById('cbclr'))return;
+    var c=document.createElement('div');
+    c.id='cbclr';c.textContent='Borrar credenciales guardadas';
+    c.style.cssText='position:fixed!important;bottom:14px!important;left:50%!important;transform:translateX(-50%)!important;padding:9px 14px!important;background:rgba(0,0,0,.62)!important;color:#fff!important;font:12px system-ui,sans-serif!important;border-radius:999px!important;z-index:2147483647!important;border:1px solid rgba(255,255,255,.18)!important;cursor:pointer!important;';
+    c.onclick=function(){AndroidBridge.requestClear();};
+    document.body.appendChild(c);
   }
-  autofill();addButtons();
-  var n=0;var t=setInterval(function(){n++;autofill();addButtons();if(n>30)clearInterval(t);},600);
+  document.addEventListener('input',report,true);
+  document.addEventListener('change',report,true);
+  document.addEventListener('blur',report,true);
+  document.addEventListener('click',function(){setTimeout(report,30);setTimeout(report,250);},true);
+  document.addEventListener('keydown',function(e){if(e.key==='Enter'){setTimeout(report,30);setTimeout(report,250);}},true);
+  autofill();addClear();
+  var n=0;var t=setInterval(function(){n++;autofill();addClear();report();if(n>30)clearInterval(t);},700);
 })();
 """.trimIndent()
     }
