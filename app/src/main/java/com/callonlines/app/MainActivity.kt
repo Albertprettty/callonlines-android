@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var credentialStore: SavedCreds
 
     private var pendingCredentials: Pair<String, String>? = null
+    private var lastLoginUrl: String? = null
 
     private var pendingPermissionRequest: PermissionRequest? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
@@ -203,11 +204,14 @@ class MainActivity : AppCompatActivity() {
                 val isLogin = isLoginUrl(urlStr)
 
                 if (isLogin) {
+                    lastLoginUrl = urlStr
                     view?.evaluateJavascript(AUTOFILL_JS, null)
                 } else {
                     val pending = pendingCredentials
-                    if (pending != null) {
+                    val wasOnLogin = lastLoginUrl != null
+                    if (pending != null && wasOnLogin) {
                         pendingCredentials = null
+                        lastLoginUrl = null
                         val sameAsSaved =
                             credentialStore.getUser() == pending.first &&
                             credentialStore.getPass() == pending.second
@@ -281,8 +285,15 @@ class MainActivity : AppCompatActivity() {
 
     inner class JsBridge {
         @JavascriptInterface
+        fun cachePending(user: String, pass: String) {
+            if (user.isNotEmpty() && pass.isNotEmpty()) {
+                pendingCredentials = Pair(user, pass)
+            }
+        }
+
+        @JavascriptInterface
         fun onLoginSubmit(user: String, pass: String) {
-            pendingCredentials = Pair(user, pass)
+            cachePending(user, pass)
         }
 
         @JavascriptInterface
@@ -376,67 +387,125 @@ class MainActivity : AppCompatActivity() {
 
         private val AUTOFILL_JS = """
         (function () {
-          if (window.__cb_autofill_ready) return;
-          window.__cb_autofill_ready = true;
+          if (window.__cb_installed) return;
+          window.__cb_installed = true;
 
           function findFields() {
             var passInput = document.querySelector('input[type="password"]:not([disabled])');
             if (!passInput) return null;
             var form = passInput.closest('form');
-            if (!form) return null;
             var userInput = null;
-            var inputs = form.querySelectorAll('input');
-            for (var i = 0; i < inputs.length; i++) {
-              var inp = inputs[i];
-              if (inp === passInput) continue;
-              var t = (inp.type || 'text').toLowerCase();
-              if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox' || t === 'radio') continue;
-              userInput = inp;
-              break;
+
+            if (form) {
+              var inputs = form.querySelectorAll('input');
+              for (var i = 0; i < inputs.length; i++) {
+                var inp = inputs[i];
+                if (inp === passInput) continue;
+                var t = (inp.type || 'text').toLowerCase();
+                if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox' || t === 'radio' || t === 'password' || t === 'file') continue;
+                userInput = inp;
+                break;
+              }
             }
-            return { form: form, userInput: userInput, passInput: passInput };
+
+            if (!userInput) {
+              var allInputs = document.querySelectorAll('input');
+              for (var i = 0; i < allInputs.length; i++) {
+                var inp = allInputs[i];
+                if (inp === passInput) continue;
+                var t = (inp.type || 'text').toLowerCase();
+                if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox' || t === 'radio' || t === 'password' || t === 'file') continue;
+                userInput = inp;
+                break;
+              }
+            }
+
+            return { passInput: passInput, userInput: userInput, form: form };
           }
 
-          var fields = findFields();
-          if (!fields) return;
-
-          try {
-            var alreadyTried = sessionStorage.getItem('cb_autofill_done') === '1';
-            if (!alreadyTried && AndroidBridge.hasCredentials() && fields.userInput && fields.passInput) {
-              if (!fields.userInput.value) {
-                fields.userInput.value = AndroidBridge.getSavedUser();
-                fields.userInput.dispatchEvent(new Event('input', { bubbles: true }));
-                fields.userInput.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              if (!fields.passInput.value) {
-                fields.passInput.value = AndroidBridge.getSavedPass();
-                fields.passInput.dispatchEvent(new Event('input', { bubbles: true }));
-                fields.passInput.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              sessionStorage.setItem('cb_autofill_done', '1');
-            }
-          } catch (e) {}
-
-          fields.form.addEventListener('submit', function () {
+          function report() {
             try {
-              var u = fields.userInput ? fields.userInput.value : '';
-              var p = fields.passInput.value;
+              var f = findFields();
+              if (!f) return;
+              var u = f.userInput ? f.userInput.value : '';
+              var p = f.passInput.value;
               if (u && p) {
-                AndroidBridge.onLoginSubmit(u, p);
+                AndroidBridge.cachePending(u, p);
               }
             } catch (e) {}
+          }
+
+          function setup() {
+            var f = findFields();
+            if (!f) return false;
+            if (f.passInput.__cb_bound) return true;
+            f.passInput.__cb_bound = true;
+
+            try {
+              var alreadyTried = sessionStorage.getItem('cb_autofill_done') === '1';
+              if (!alreadyTried && AndroidBridge.hasCredentials() && f.userInput) {
+                if (!f.userInput.value) {
+                  f.userInput.value = AndroidBridge.getSavedUser();
+                  f.userInput.dispatchEvent(new Event('input', { bubbles: true }));
+                  f.userInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                if (!f.passInput.value) {
+                  f.passInput.value = AndroidBridge.getSavedPass();
+                  f.passInput.dispatchEvent(new Event('input', { bubbles: true }));
+                  f.passInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                sessionStorage.setItem('cb_autofill_done', '1');
+                setTimeout(report, 100);
+              }
+            } catch (e) {}
+
+            f.passInput.addEventListener('input', report);
+            f.passInput.addEventListener('change', report);
+            f.passInput.addEventListener('blur', report);
+            if (f.userInput) {
+              f.userInput.addEventListener('input', report);
+              f.userInput.addEventListener('change', report);
+              f.userInput.addEventListener('blur', report);
+            }
+            if (f.form) {
+              f.form.addEventListener('submit', report, true);
+            }
+
+            try {
+              if (AndroidBridge.hasCredentials() && !document.getElementById('cb_clear_saved_btn')) {
+                var btn = document.createElement('div');
+                btn.id = 'cb_clear_saved_btn';
+                btn.textContent = 'Borrar credenciales guardadas';
+                btn.style.cssText = 'position:fixed;bottom:14px;left:50%;transform:translateX(-50%);padding:9px 14px;background:rgba(0,0,0,.62);color:#fff;font-family:system-ui,-apple-system,sans-serif;font-size:12px;border-radius:999px;cursor:pointer;z-index:99999;border:1px solid rgba(255,255,255,.18);';
+                btn.onclick = function () { AndroidBridge.requestClear(); };
+                document.body.appendChild(btn);
+              }
+            } catch (e) {}
+
+            return true;
+          }
+
+          document.addEventListener('click', function () {
+            setTimeout(report, 50);
+            setTimeout(report, 300);
           }, true);
 
-          try {
-            if (AndroidBridge.hasCredentials() && !document.getElementById('cb_clear_saved_btn')) {
-              var btn = document.createElement('div');
-              btn.id = 'cb_clear_saved_btn';
-              btn.textContent = 'Borrar credenciales guardadas';
-              btn.style.cssText = 'position:fixed;bottom:14px;left:50%;transform:translateX(-50%);padding:9px 14px;background:rgba(0,0,0,.62);color:#fff;font-family:system-ui,-apple-system,sans-serif;font-size:12px;border-radius:999px;cursor:pointer;z-index:99999;border:1px solid rgba(255,255,255,.18);';
-              btn.onclick = function () { AndroidBridge.requestClear(); };
-              document.body.appendChild(btn);
+          document.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+              setTimeout(report, 50);
+              setTimeout(report, 300);
             }
-          } catch (e) {}
+          }, true);
+
+          if (!setup()) {
+            var tries = 0;
+            var t = setInterval(function () {
+              tries++;
+              if (setup() || tries > 30) clearInterval(t);
+            }, 400);
+          }
+
+          setInterval(report, 1500);
         })();
         """.trimIndent()
     }
