@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CallOnLines</string>
+    <string name="cannot_open_link">No se pudo abrir el enlace</string>
+    <string name="ssl_error">Error de seguridad SSL</string>
+    <string name="cannot_open_file_picker">No se pudo abrir el selector de archivos</string>
+</resources>

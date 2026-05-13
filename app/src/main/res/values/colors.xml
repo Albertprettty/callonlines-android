@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary_cyan">#22D3EE</color>
+    <color name="primary_purple">#A855F7</color>
+    <color name="bg_dark">#0A1728</color>
+    <color name="bg_darker">#07111F</color>
+    <color name="accent">#67E8F9</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+    <color name="ic_launcher_background">#0A1728</color>
+</resources>
