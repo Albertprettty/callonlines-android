@@ -9,7 +9,9 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Bundle
+import android.text.InputType
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
@@ -20,6 +22,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -178,21 +182,8 @@ class MainActivity : AppCompatActivity() {
 
     inner class JsBridge {
         @JavascriptInterface
-        fun saveCredsManual(user: String, pass: String) {
-            runOnUiThread {
-                if (user.isBlank() || pass.isBlank()) {
-                    Toast.makeText(this@MainActivity, "Escribe usuario y contraseña primero", Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
-                }
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("¿Guardar credenciales?")
-                    .setMessage("Usuario: $user")
-                    .setPositiveButton("Guardar") { _, _ ->
-                        creds.save(user, pass)
-                        Toast.makeText(this@MainActivity, "Credenciales guardadas", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("Cancelar", null).show()
-            }
+        fun openSaveDialog(prefillUser: String, prefillPass: String) {
+            runOnUiThread { showCredsDialog(prefillUser, prefillPass) }
         }
         @JavascriptInterface fun getSavedUser() = creds.getUser()
         @JavascriptInterface fun getSavedPass() = creds.getPass()
@@ -212,6 +203,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showCredsDialog(initU: String, initP: String) {
+        val pad = (resources.displayMetrics.density * 20).toInt()
+        val userEdit = EditText(this).apply {
+            hint = "Usuario"
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(if (initU.isNotEmpty()) initU else creds.getUser())
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        val passEdit = EditText(this).apply {
+            hint = "Contraseña"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(if (initP.isNotEmpty()) initP else creds.getPass())
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(userEdit)
+            addView(passEdit)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Guardar credenciales")
+            .setMessage("Escribe o confirma tus datos. Se guardarán en este dispositivo para autocompletar la próxima vez.")
+            .setView(layout)
+            .setPositiveButton("Guardar") { _, _ ->
+                val u = userEdit.text.toString().trim()
+                val p = passEdit.text.toString()
+                if (u.isNotBlank() && p.isNotBlank()) {
+                    creds.save(u, p)
+                    Toast.makeText(this, "✓ Credenciales guardadas", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Escribe usuario y contraseña", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
     private fun isAllowed(host: String) = ALLOWED.any { host == it || host.endsWith(".$it") }
 
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); webView.saveState(outState) }
@@ -227,44 +255,68 @@ class MainActivity : AppCompatActivity() {
 
         private val JS = """
 (function(){
-  if(window.__cb)return;
-  function find(){
-    var p=document.querySelector('input[type="password"]:not([disabled])');
-    if(!p)return null;
-    var ins=document.querySelectorAll('input'),u=null,bad=['hidden','submit','button','checkbox','radio','password','file'];
-    for(var i=0;i<ins.length;i++){var x=ins[i];if(x===p)continue;if(bad.indexOf((x.type||'text').toLowerCase())>=0)continue;u=x;break;}
-    return{u:u,p:p};
+  if(window.__cbReady)return;
+  window.__cbReady=true;
+  function findPass(){
+    var ps=document.querySelectorAll('input[type="password"]:not([disabled])');
+    if(ps.length)return ps[0];
+    var all=document.querySelectorAll('input:not([disabled])');
+    for(var i=0;i<all.length;i++){
+      var c=all[i],t=(c.type||'').toLowerCase();
+      if(['hidden','submit','button','checkbox','radio','file'].indexOf(t)>=0)continue;
+      var a=((c.placeholder||'')+' '+(c.name||'')+' '+(c.id||'')+' '+(c.className||'')+' '+(c.getAttribute('aria-label')||'')).toLowerCase();
+      if(a.indexOf('pass')>=0||a.indexOf('clave')>=0||a.indexOf('contras')>=0)return c;
+    }
+    return null;
   }
-  function tick(){
-    var f=find();if(!f)return;
-    window.__cb=true;
+  function findUser(pass){
+    var all=document.querySelectorAll('input:not([disabled])'),prev=null;
+    for(var i=0;i<all.length;i++){
+      var c=all[i];if(c===pass)return prev;
+      var t=(c.type||'').toLowerCase();
+      if(['hidden','submit','button','checkbox','radio','password','file'].indexOf(t)>=0)continue;
+      prev=c;
+    }
+    for(var i=0;i<all.length;i++){
+      var c=all[i];if(c===pass)continue;
+      var t=(c.type||'').toLowerCase();
+      if(['hidden','submit','button','checkbox','radio','password','file'].indexOf(t)>=0)continue;
+      var a=((c.placeholder||'')+' '+(c.name||'')+' '+(c.id||'')+' '+(c.className||'')+' '+(c.getAttribute('aria-label')||'')).toLowerCase();
+      if(a.indexOf('user')>=0||a.indexOf('usuari')>=0||a.indexOf('email')>=0||a.indexOf('login')>=0)return c;
+    }
+    return null;
+  }
+  function autofill(){
     try{
-      if(AndroidBridge.hasCredentials()&&f.u&&!f.u.value){
-        f.u.value=AndroidBridge.getSavedUser();
-        f.p.value=AndroidBridge.getSavedPass();
-        f.u.dispatchEvent(new Event('input',{bubbles:true}));
-        f.p.dispatchEvent(new Event('input',{bubbles:true}));
-      }
+      if(!AndroidBridge.hasCredentials())return;
+      var p=findPass();if(!p)return;
+      var u=findUser(p);
+      if(u&&!u.value){u.value=AndroidBridge.getSavedUser();u.dispatchEvent(new Event('input',{bubbles:true}));u.dispatchEvent(new Event('change',{bubbles:true}));}
+      if(!p.value){p.value=AndroidBridge.getSavedPass();p.dispatchEvent(new Event('input',{bubbles:true}));p.dispatchEvent(new Event('change',{bubbles:true}));}
     }catch(e){}
+  }
+  function addButtons(){
     if(!document.getElementById('cbsave')){
       var b=document.createElement('button');
       b.id='cbsave';b.type='button';b.textContent='Guardar contrasena';
-      b.style.cssText='position:fixed!important;top:14px!important;right:14px!important;padding:11px 18px!important;background:linear-gradient(135deg,#22D3EE,#A855F7)!important;color:#fff!important;font:700 13px system-ui,sans-serif!important;border:0!important;border-radius:10px!important;z-index:2147483647!important;box-shadow:0 4px 14px rgba(34,211,238,.5)!important;';
-      b.onclick=function(e){e.preventDefault();e.stopPropagation();var f=find();AndroidBridge.saveCredsManual(f&&f.u?f.u.value:'',f&&f.p?f.p.value:'');};
+      b.style.cssText='position:fixed!important;top:14px!important;right:14px!important;padding:11px 18px!important;background:linear-gradient(135deg,#22D3EE,#A855F7)!important;color:#fff!important;font:700 13px system-ui,sans-serif!important;border:0!important;border-radius:10px!important;z-index:2147483647!important;box-shadow:0 4px 14px rgba(34,211,238,.5)!important;cursor:pointer!important;';
+      b.onclick=function(e){
+        e.preventDefault();e.stopPropagation();
+        var p=findPass(),u=p?findUser(p):null;
+        AndroidBridge.openSaveDialog(u&&u.value?u.value:'',p&&p.value?p.value:'');
+      };
       document.body.appendChild(b);
     }
-    try{
-      if(AndroidBridge.hasCredentials()&&!document.getElementById('cbclr')){
-        var c=document.createElement('div');
-        c.id='cbclr';c.textContent='Borrar credenciales guardadas';
-        c.style.cssText='position:fixed!important;bottom:14px!important;left:50%!important;transform:translateX(-50%)!important;padding:9px 14px!important;background:rgba(0,0,0,.62)!important;color:#fff!important;font:12px system-ui,sans-serif!important;border-radius:999px!important;z-index:2147483647!important;border:1px solid rgba(255,255,255,.18)!important;';
-        c.onclick=function(){AndroidBridge.requestClear();};
-        document.body.appendChild(c);
-      }
-    }catch(e){}
+    if(AndroidBridge.hasCredentials()&&!document.getElementById('cbclr')){
+      var c=document.createElement('div');
+      c.id='cbclr';c.textContent='Borrar credenciales guardadas';
+      c.style.cssText='position:fixed!important;bottom:14px!important;left:50%!important;transform:translateX(-50%)!important;padding:9px 14px!important;background:rgba(0,0,0,.62)!important;color:#fff!important;font:12px system-ui,sans-serif!important;border-radius:999px!important;z-index:2147483647!important;border:1px solid rgba(255,255,255,.18)!important;cursor:pointer!important;';
+      c.onclick=function(){AndroidBridge.requestClear();};
+      document.body.appendChild(c);
+    }
   }
-  tick();
-  var n=0;var t=setInterval(function(){n++;tick();if(window.__cb||n>40)clearInterval(t);},500);
+  autofill();addButtons();
+  var n=0;var t=setInterval(function(){n++;autofill();addButtons();if(n>30)clearInterval(t);},600);
 })();
 """.trimIndent()
     }
