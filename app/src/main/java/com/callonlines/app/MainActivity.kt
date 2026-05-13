@@ -297,6 +297,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun notifyLoginSuccess() {
+            val pending = pendingCredentials ?: return
+            pendingCredentials = null
+            lastLoginUrl = null
+            val sameAsSaved =
+                credentialStore.getUser() == pending.first &&
+                credentialStore.getPass() == pending.second
+            if (!sameAsSaved) {
+                showSaveCredentialsDialog(pending.first, pending.second)
+            }
+        }
+
+        @JavascriptInterface
         fun getSavedUser(): String = credentialStore.getUser()
 
         @JavascriptInterface
@@ -390,12 +403,128 @@ class MainActivity : AppCompatActivity() {
           if (window.__cb_installed) return;
           window.__cb_installed = true;
 
+          function cache(u, p) {
+            try {
+              if (u && p) AndroidBridge.cachePending(String(u), String(p));
+            } catch (e) {}
+          }
+
+          function triggerSave() {
+            try { AndroidBridge.notifyLoginSuccess(); } catch (e) {}
+          }
+
+          function extractFromParams(p) {
+            var u = p.username || p.user || p.email || p.login || p.usr || p.user_email || p.login_name || p.userName || p.Username || p.Email;
+            var pw = p.password || p.pass || p.passwd || p.pwd || p.user_password || p.Password;
+            if (u && pw) cache(u, pw);
+          }
+
+          function extractFromJson(json, depth) {
+            depth = depth || 0;
+            if (depth > 5 || !json || typeof json !== 'object') return;
+            var u = null, pw = null;
+            for (var k in json) {
+              var kl = k.toLowerCase();
+              var v = json[k];
+              if (v && typeof v === 'object') {
+                extractFromJson(v, depth + 1);
+                continue;
+              }
+              if (typeof v !== 'string' && typeof v !== 'number') continue;
+              var sv = String(v);
+              if (!u && (kl === 'username' || kl === 'user' || kl === 'email' || kl === 'login' || kl === 'usr' || kl === 'user_email' || kl === 'login_name' || kl === 'username')) u = sv;
+              if (!pw && (kl === 'password' || kl === 'pass' || kl === 'passwd' || kl === 'pwd' || kl === 'user_password')) pw = sv;
+            }
+            if (u && pw) cache(u, pw);
+          }
+
+          function extractFromBody(body) {
+            try {
+              if (!body) return;
+              if (typeof body === 'string') {
+                var s = body.trim();
+                if (s[0] === '{' || s[0] === '[') {
+                  try { extractFromJson(JSON.parse(s)); } catch (e) {}
+                }
+                if (s.indexOf('=') !== -1) {
+                  var params = {};
+                  var pairs = s.split('&');
+                  for (var i = 0; i < pairs.length; i++) {
+                    var idx = pairs[i].indexOf('=');
+                    if (idx === -1) continue;
+                    try {
+                      var k = decodeURIComponent(pairs[i].substring(0, idx)).toLowerCase();
+                      var v = decodeURIComponent(pairs[i].substring(idx + 1).replace(/\+/g, ' '));
+                      params[k] = v;
+                    } catch (e) {}
+                  }
+                  extractFromParams(params);
+                }
+              } else if (body instanceof FormData) {
+                var p = {};
+                body.forEach(function (v, k) { p[k.toLowerCase()] = v; });
+                extractFromParams(p);
+              } else if (body instanceof URLSearchParams) {
+                var p2 = {};
+                body.forEach(function (v, k) { p2[k.toLowerCase()] = v; });
+                extractFromParams(p2);
+              }
+            } catch (e) {}
+          }
+
+          try {
+            var OrigOpen = XMLHttpRequest.prototype.open;
+            var OrigSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (method, url) {
+              this.__cb_url = (url || '').toString();
+              return OrigOpen.apply(this, arguments);
+            };
+            XMLHttpRequest.prototype.send = function (body) {
+              var self = this;
+              try { if (body) extractFromBody(body); } catch (e) {}
+              this.addEventListener('load', function () {
+                try {
+                  var u = (self.__cb_url || '').toLowerCase();
+                  if (self.status >= 200 && self.status < 400 &&
+                      (u.indexOf('login') !== -1 || u.indexOf('auth') !== -1 || u.indexOf('sign') !== -1)) {
+                    setTimeout(triggerSave, 250);
+                  }
+                } catch (e) {}
+              });
+              return OrigSend.apply(this, arguments);
+            };
+          } catch (e) {}
+
+          try {
+            if (window.fetch) {
+              var OrigFetch = window.fetch;
+              window.fetch = function (input, init) {
+                var url = '';
+                try {
+                  url = (typeof input === 'string' ? input : (input && input.url) || '').toString();
+                } catch (e) {}
+                try { if (init && init.body) extractFromBody(init.body); } catch (e) {}
+                var p = OrigFetch.apply(this, arguments);
+                try {
+                  p.then(function (res) {
+                    try {
+                      var ul = url.toLowerCase();
+                      if (res && res.ok && (ul.indexOf('login') !== -1 || ul.indexOf('auth') !== -1 || ul.indexOf('sign') !== -1)) {
+                        setTimeout(triggerSave, 250);
+                      }
+                    } catch (e) {}
+                  });
+                } catch (e) {}
+                return p;
+              };
+            }
+          } catch (e) {}
+
           function findFields() {
             var passInput = document.querySelector('input[type="password"]:not([disabled])');
             if (!passInput) return null;
             var form = passInput.closest('form');
             var userInput = null;
-
             if (form) {
               var inputs = form.querySelectorAll('input');
               for (var i = 0; i < inputs.length; i++) {
@@ -407,7 +536,6 @@ class MainActivity : AppCompatActivity() {
                 break;
               }
             }
-
             if (!userInput) {
               var allInputs = document.querySelectorAll('input');
               for (var i = 0; i < allInputs.length; i++) {
@@ -419,19 +547,14 @@ class MainActivity : AppCompatActivity() {
                 break;
               }
             }
-
             return { passInput: passInput, userInput: userInput, form: form };
           }
 
-          function report() {
+          function reportFromDom() {
             try {
               var f = findFields();
               if (!f) return;
-              var u = f.userInput ? f.userInput.value : '';
-              var p = f.passInput.value;
-              if (u && p) {
-                AndroidBridge.cachePending(u, p);
-              }
+              cache(f.userInput ? f.userInput.value : '', f.passInput.value);
             } catch (e) {}
           }
 
@@ -455,20 +578,20 @@ class MainActivity : AppCompatActivity() {
                   f.passInput.dispatchEvent(new Event('change', { bubbles: true }));
                 }
                 sessionStorage.setItem('cb_autofill_done', '1');
-                setTimeout(report, 100);
+                setTimeout(reportFromDom, 100);
               }
             } catch (e) {}
 
-            f.passInput.addEventListener('input', report);
-            f.passInput.addEventListener('change', report);
-            f.passInput.addEventListener('blur', report);
+            f.passInput.addEventListener('input', reportFromDom);
+            f.passInput.addEventListener('change', reportFromDom);
+            f.passInput.addEventListener('blur', reportFromDom);
             if (f.userInput) {
-              f.userInput.addEventListener('input', report);
-              f.userInput.addEventListener('change', report);
-              f.userInput.addEventListener('blur', report);
+              f.userInput.addEventListener('input', reportFromDom);
+              f.userInput.addEventListener('change', reportFromDom);
+              f.userInput.addEventListener('blur', reportFromDom);
             }
             if (f.form) {
-              f.form.addEventListener('submit', report, true);
+              f.form.addEventListener('submit', reportFromDom, true);
             }
 
             try {
@@ -486,26 +609,22 @@ class MainActivity : AppCompatActivity() {
           }
 
           document.addEventListener('click', function () {
-            setTimeout(report, 50);
-            setTimeout(report, 300);
+            setTimeout(reportFromDom, 50);
           }, true);
 
           document.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') {
-              setTimeout(report, 50);
-              setTimeout(report, 300);
-            }
+            if (e.key === 'Enter') setTimeout(reportFromDom, 50);
           }, true);
 
           if (!setup()) {
             var tries = 0;
             var t = setInterval(function () {
               tries++;
-              if (setup() || tries > 30) clearInterval(t);
+              if (setup() || tries > 40) clearInterval(t);
             }, 400);
           }
 
-          setInterval(report, 1500);
+          setInterval(reportFromDom, 1500);
         })();
         """.trimIndent()
     }
